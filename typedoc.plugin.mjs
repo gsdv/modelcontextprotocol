@@ -188,12 +188,38 @@ function renderCategory(category, events, theme) {
 }
 
 /**
+ * Emits two parallel renderings wrapped in Mintlify `<Visibility>` components:
+ * the rich HTML block for the web view and a clean Markdown block for the
+ * `.md` mirror served to AI agents. See issue #2621.
+ *
  * @param {typedoc.DeclarationReflection} reflection
  * @param {typedoc.DefaultThemeRenderContext} context
  * @returns {string}
  */
 function renderReflection(reflection, context) {
   const name = reflection.getFriendlyFullName();
+  const html = renderReflectionHtml(reflection, context);
+  const md = renderReflectionMarkdown(reflection);
+
+  // Wrap heading and both Visibility blocks in the `.type` container so the
+  // existing CSS spacing applies to the heading on the rendered page. The
+  // heading itself sits outside the Visibility blocks so the table of contents
+  // sees a single entry per type rather than duplicates.
+  return (
+    `<div class="type">\n\n` +
+    `### \`${name}\`\n\n` +
+    `<Visibility for="humans">\n\n${html}\n\n</Visibility>\n\n` +
+    `<Visibility for="agents">\n\n${md}\n\n</Visibility>\n\n` +
+    `</div>\n\n`
+  );
+}
+
+/**
+ * @param {typedoc.DeclarationReflection} reflection
+ * @param {typedoc.DefaultThemeRenderContext} context
+ * @returns {string}
+ */
+function renderReflectionHtml(reflection, context) {
   const members = reflection.children ?? [];
 
   const codeBlock = context.reflectionPreview(reflection);
@@ -270,7 +296,95 @@ function renderReflection(reflection, context) {
       char => MARKDOWN_SPECIAL_CHARS_HTML_ENTITIES[char]
     );
 
-  return `<div class="type">\n\n### \`${name}\`\n\n${content}\n</div>\n\n`;
+  return content;
+}
+
+/**
+ * Renders a reflection as clean Markdown for the `.md` mirror served to agents.
+ * Walks the TypeDoc reflection model directly (no HTML pipeline) so the output
+ * is free of `tsd-*` class wrappers, anchor SVGs, and similar render-only noise.
+ *
+ * @param {typedoc.DeclarationReflection} reflection
+ * @returns {string}
+ */
+function renderReflectionMarkdown(reflection) {
+  const parts = [];
+
+  const summary = displayPartsToText(reflection.comment?.summary);
+  if (summary) parts.push(summary);
+
+  const signature = buildTypeSignature(reflection);
+  if (signature) parts.push("```ts\n" + signature + "\n```");
+
+  const members = reflection.children ?? [];
+  if (members.length > 0) {
+    parts.push("**Fields:**\n\n" + members.map(memberToMarkdownLine).join("\n"));
+  }
+
+  for (const tag of reflection.comment?.blockTags ?? []) {
+    if (tag.tag === "@example") {
+      const exampleText = displayPartsToText(tag.content);
+      if (exampleText) parts.push(`**Example:**\n\n${exampleText}`);
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+/**
+ * @param {readonly typedoc.CommentDisplayPart[] | undefined} parts
+ * @returns {string}
+ */
+function displayPartsToText(parts) {
+  if (!parts) return "";
+  return parts.map(p => p.text ?? "").join("").trim();
+}
+
+/**
+ * @param {typedoc.DeclarationReflection} reflection
+ * @returns {string | null}
+ */
+function buildTypeSignature(reflection) {
+  const name = reflection.name;
+  const children = reflection.children ?? [];
+
+  if (children.length > 0) {
+    const memberLines = children.map(m => {
+      const opt = m.flags?.isOptional ? "?" : "";
+      return `  ${m.name}${opt}: ${typeToString(m.type)};`;
+    });
+    return `interface ${name} {\n${memberLines.join("\n")}\n}`;
+  }
+
+  if (reflection.type) {
+    return `type ${name} = ${typeToString(reflection.type)};`;
+  }
+
+  return null;
+}
+
+/**
+ * @param {typedoc.DeclarationReflection} member
+ * @returns {string}
+ */
+function memberToMarkdownLine(member) {
+  const opt = member.flags?.isOptional ? "?" : "";
+  const summary = displayPartsToText(member.comment?.summary).replace(/\s+/g, " ");
+  const head = `- \`${member.name}${opt}: ${typeToString(member.type)}\``;
+  return summary ? `${head} \u2014 ${summary}` : head;
+}
+
+/**
+ * @param {typedoc.SomeType | undefined} type
+ * @returns {string}
+ */
+function typeToString(type) {
+  if (!type) return "unknown";
+  try {
+    return type.toString();
+  } catch {
+    return "unknown";
+  }
 }
 
 /**
